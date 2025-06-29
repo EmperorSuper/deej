@@ -33,6 +33,9 @@ type SerialIO struct {
 	currentSliderPercentValues []float32
 
 	sliderMoveConsumers []chan SliderMoveEvent
+
+	watchdogRunning bool
+	lastLine time.Time
 }
 
 // SliderMoveEvent represents a single slider move captured by deej
@@ -55,6 +58,8 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 		connected:           false,
 		conn:                nil,
 		sliderMoveConsumers: []chan SliderMoveEvent{},
+		watchdogRunning:     false,
+		lastLine:            time.Now(),
 	}
 
 	logger.Debug("Created serial i/o instance")
@@ -124,7 +129,36 @@ func (sio *SerialIO) Start() error {
 		}
 	}()
 
+	sio.StartWatchdog()
+
 	return nil
+}
+
+// Every second, check if we are still receiving lines
+func (sio *SerialIO) StartWatchdog() {
+	if sio.watchdogRunning {
+		return
+	}
+
+	sio.watchdogRunning = true
+	
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if time.Since(sio.lastLine) > 1 * time.Second {
+					// first stop the connection then 1 second later start it again
+					if sio.connected {
+						sio.Stop()
+					} else {
+						sio.Start()
+					}
+				}
+			}
+		}
+	}()
 }
 
 // Stop signals us to shut down our serial connection, if one is active
@@ -234,6 +268,9 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 	if !expectedLinePattern.MatchString(line) {
 		return
 	}
+
+	// save when the line was recieved for watchdog
+	sio.lastLine = time.Now()
 
 	// trim the suffix
 	line = strings.TrimSuffix(line, "\r\n")
